@@ -209,15 +209,18 @@ class MainActivity : AppCompatActivity() {
             if (loadCredential() != null) "Status: connected" else "Status: not connected"
     }
 
+    // A Dropbox client built from the saved credential, or null if not connected. Cheap to build
+    // (no network); rebuilt per use so a refreshed credential is always picked up.
+    private fun dbxClient(): DbxClientV2? = loadCredential()?.let { DbxClientV2(requestConfig, it) }
+
     private fun runFileOp(name: String, create: Boolean) {
-        val credential = loadCredential()
-        if (credential == null) { log("Not connected. Connect to Dropbox first."); return }
+        val client = dbxClient()
+        if (client == null) { log("Not connected. Connect to Dropbox first."); return }
         val path = signalDir + name
 
         lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) {
                 try {
-                    val client = DbxClientV2(requestConfig, credential)
                     if (create) {
                         client.files().uploadBuilder(path)
                             .withMode(WriteMode.OVERWRITE)
@@ -248,27 +251,13 @@ class MainActivity : AppCompatActivity() {
 
     // Check which signal files currently exist (one folder listing) and grey out the no-op buttons.
     private fun refreshFileStates() {
-        val credential = loadCredential() ?: return
+        val client = dbxClient() ?: return
         lifecycleScope.launch {
             val existing = withContext(Dispatchers.IO) {
                 try {
-                    val client = DbxClientV2(requestConfig, credential)
-                    val names = mutableSetOf<String>()
-                    var result = client.files().listFolder(signalDir.trimEnd('/'))
-                    while (true) {
-                        for (entry in result.entries) {
-                            if (entry is FileMetadata) names.add(entry.name)
-                        }
-                        if (!result.hasMore) break
-                        result = client.files().listFolderContinue(result.cursor)
-                    }
-                    names
-                } catch (e: ListFolderErrorException) {
-                    // Missing folder means none of the signal files exist.
-                    if (e.errorValue.isPath && e.errorValue.pathValue.isNotFound) emptySet()
-                    else null
+                    listAllFiles(client, signalDir.trimEnd('/')).map { it.name }.toSet()
                 } catch (e: Exception) {
-                    null
+                    null  // leave button states unchanged on a transient error
                 }
             }
             if (existing != null) {
@@ -277,7 +266,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private data class Loaded(val name: String?, val bytes: ByteArray?, val box: Rect?, val error: String?)
+    private data class Loaded(val bytes: ByteArray?, val box: Rect?, val error: String?)
 
     // One on-screen detection image (vehicle or human): downloads the newest file, caches its
     // bytes and bounding box, and renders either the whole image or just the box.
@@ -289,38 +278,27 @@ class MainActivity : AppCompatActivity() {
     ) {
         private var bytes: ByteArray? = null
         private var box: Rect? = null
-        var shown = false  // true while this panel is displaying an actual image
-
-        private fun empty() {
-            shown = false
-            showEmpty(caption, image, emptyMsg)
-        }
 
         // Download the newest detection image, cache its bytes + box, then render.
         fun refresh() {
-            val credential = loadCredential()
-            if (credential == null) { bytes = null; box = null; empty(); return }
+            val client = dbxClient()
+            if (client == null) { bytes = null; box = null; showEmpty(caption, image, emptyMsg); return }
             lifecycleScope.launch {
                 val loaded = withContext(Dispatchers.IO) {
                     try {
-                        val client = DbxClientV2(requestConfig, credential)
+                        // A missing folder yields no file, so this shows the empty state, not an error.
                         val latest = findLatestFile(client, dir)
-                            ?: return@withContext Loaded(null, null, null, null)
+                            ?: return@withContext Loaded(null, null, null)
                         val out = ByteArrayOutputStream()
                         client.files().download(latest.pathLower).download(out)
-                        Loaded(latest.name, out.toByteArray(), parseBox(latest.name), null)
-                    } catch (e: ListFolderErrorException) {
-                        // A missing folder just means nothing has been detected yet.
-                        if (e.errorValue.isPath && e.errorValue.pathValue.isNotFound)
-                            Loaded(null, null, null, null)
-                        else Loaded(null, null, null, e.message)
+                        Loaded(out.toByteArray(), parseBox(latest.name), null)
                     } catch (e: Exception) {
-                        Loaded(null, null, null, e.message)
+                        Loaded(null, null, e.message)
                     }
                 }
                 if (loaded.error != null) {
                     bytes = null; box = null
-                    empty()
+                    showEmpty(caption, image, emptyMsg)
                     log("Error loading $dir: ${loaded.error}")
                     return@launch
                 }
@@ -332,7 +310,7 @@ class MainActivity : AppCompatActivity() {
 
         // Re-decode the cached bytes in the current mode; no network, so toggling is instant.
         fun render() {
-            val data = bytes ?: run { empty(); return }
+            val data = bytes ?: run { showEmpty(caption, image, emptyMsg); return }
             val useBox = boxOnly
             val rect = box
             lifecycleScope.launch {
@@ -346,10 +324,8 @@ class MainActivity : AppCompatActivity() {
                     caption.visibility = View.GONE
                     image.setImageBitmap(bmp)
                     image.visibility = View.VISIBLE
-                    shown = true
-                    clearLogIfAllShown()
                 } else {
-                    empty()
+                    showEmpty(caption, image, emptyMsg)
                 }
             }
         }
@@ -364,6 +340,7 @@ class MainActivity : AppCompatActivity() {
 
     // Refresh both images from Dropbox (newest vehicle, then newest human below it).
     private fun refreshImages() {
+        log("")  // drop any stale message; an error from this refresh will re-appear
         vehiclePanel.refresh()
         humanPanel.refresh()
     }
@@ -372,11 +349,6 @@ class MainActivity : AppCompatActivity() {
     private fun rerenderImages() {
         vehiclePanel.render()
         humanPanel.render()
-    }
-
-    // Once both panels show real images, wipe any stale error left in the log line.
-    private fun clearLogIfAllShown() {
-        if (vehiclePanel.shown && humanPanel.shown) log("")
     }
 
     // Bounding box encoded in the filename: ..._<x1>_<y1>_<x2>_<y2>_... (pixels, upper-left corner
@@ -404,10 +376,9 @@ class MainActivity : AppCompatActivity() {
                 box.bottom.coerceIn(0, decoder.height)
             )
             if (rect.width() <= 0 || rect.height() <= 0) return null
-            var sample = 1
-            val largest = maxOf(rect.width(), rect.height())
-            while (largest / sample > maxDim) sample *= 2
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSizeFor(maxOf(rect.width(), rect.height()), maxDim)
+            }
             return decoder.decodeRegion(rect, opts)
         } finally {
             decoder.recycle()
@@ -421,23 +392,26 @@ class MainActivity : AppCompatActivity() {
         caption.text = emptyMsg
     }
 
-    // Walk the whole folder (paginated) and keep the newest matching image by upload time.
-    private fun findLatestFile(client: DbxClientV2, dir: String): FileMetadata? {
-        var latest: FileMetadata? = null
-        var result = client.files().listFolder(dir)
+    // List every file directly in a folder, paging through all results. A missing folder is empty.
+    private fun listAllFiles(client: DbxClientV2, dir: String): List<FileMetadata> {
+        val files = mutableListOf<FileMetadata>()
+        var result = try {
+            client.files().listFolder(dir)
+        } catch (e: ListFolderErrorException) {
+            if (e.errorValue.isPath && e.errorValue.pathValue.isNotFound) return emptyList()
+            throw e
+        }
         while (true) {
-            for (entry in result.entries) {
-                if (entry is FileMetadata && isDetectionImage(entry.name)) {
-                    if (latest == null || entry.serverModified.after(latest!!.serverModified)) {
-                        latest = entry
-                    }
-                }
-            }
+            for (entry in result.entries) if (entry is FileMetadata) files.add(entry)
             if (!result.hasMore) break
             result = client.files().listFolderContinue(result.cursor)
         }
-        return latest
+        return files
     }
+
+    // The newest detection image in a folder, by Dropbox upload time, or null if there is none.
+    private fun findLatestFile(client: DbxClientV2, dir: String): FileMetadata? =
+        listAllFiles(client, dir).filter { isDetectionImage(it.name) }.maxByOrNull { it.serverModified }
 
     private fun isDetectionImage(name: String): Boolean {
         if (name.count { it == '_' } != 6) return false
@@ -450,11 +424,17 @@ class MainActivity : AppCompatActivity() {
     private fun decodeSampled(bytes: ByteArray, maxDim: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        var sample = 1
-        val largest = maxOf(bounds.outWidth, bounds.outHeight)
-        while (largest / sample > maxDim) sample *= 2
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sampleSizeFor(maxOf(bounds.outWidth, bounds.outHeight), maxDim)
+        }
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    }
+
+    // Largest power-of-two inSampleSize that keeps the longer side at or under maxDim.
+    private fun sampleSizeFor(largest: Int, maxDim: Int): Int {
+        var sample = 1
+        while (largest / sample > maxDim) sample *= 2
+        return sample
     }
 
     private fun log(message: String) {
