@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/menuMain"
+        android:title="Main"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/menuConnect"
+        android:title="Connect"
+        app:showAsAction="never" />
+
+</menu>
