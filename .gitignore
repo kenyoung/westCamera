@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+
+# Android build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+.cxx/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+.navigation/
+
+# Local, machine-specific config (SDK path, etc.) — never commit
+local.properties
+
+# Signing material — never commit
+*.jks
+*.keystore
+keystore.properties
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
