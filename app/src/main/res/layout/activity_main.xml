@@ -256,6 +256,50 @@
 
             </LinearLayout>
 
+            <!-- Prune page: bulk-delete old detection files. Hidden by default. -->
+            <LinearLayout
+                android:id="@+id/prunePage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <Button
+                    android:id="@+id/pruneVehWeek"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Prune vehicles older than 1 week" />
+
+                <Button
+                    android:id="@+id/pruneVehDay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Prune vehicles older than 1 day" />
+
+                <Button
+                    android:id="@+id/pruneHumWeek"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:text="Prune humans older than 1 week" />
+
+                <Button
+                    android:id="@+id/pruneHumDay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Prune humans older than 1 day" />
+
+                <TextView
+                    android:id="@+id/pruneLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="16dp"
+                    android:textIsSelectable="true" />
+
+            </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

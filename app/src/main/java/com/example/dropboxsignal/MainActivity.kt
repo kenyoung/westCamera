@@ -31,6 +31,7 @@ import com.dropbox.core.DbxWebAuth
 import com.dropbox.core.TokenAccessType
 import com.dropbox.core.oauth.DbxCredential
 import com.dropbox.core.v2.DbxClientV2
+import com.dropbox.core.v2.files.DeleteArg
 import com.dropbox.core.v2.files.FileMetadata
 import com.dropbox.core.v2.files.ListFolderErrorException
 import com.dropbox.core.v2.files.WriteMode
@@ -45,6 +46,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Date
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -94,6 +96,12 @@ class MainActivity : AppCompatActivity() {
             rerenderImages()
         }
         updateBoxDot(boxOnly)
+
+        binding.pruneVehWeek.setOnClickListener { pruneOlderThan(vehiclesDir, "vehicle", "1 week", Duration.ofDays(7)) }
+        binding.pruneVehDay.setOnClickListener { pruneOlderThan(vehiclesDir, "vehicle", "1 day", Duration.ofDays(1)) }
+        binding.pruneHumWeek.setOnClickListener { pruneOlderThan(humansDir, "human", "1 week", Duration.ofDays(7)) }
+        binding.pruneHumDay.setOnClickListener { pruneOlderThan(humansDir, "human", "1 day", Duration.ofDays(1)) }
+
         buildFileRows()
     }
 
@@ -111,8 +119,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.menuMain -> { showPage(main = true); true }
-            R.id.menuConnect -> { showPage(main = false); true }
+            R.id.menuMain -> { showPage(Page.MAIN); true }
+            R.id.menuConnect -> { showPage(Page.CONNECT); true }
+            R.id.menuPrune -> { showPage(Page.PRUNE); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -122,9 +131,12 @@ class MainActivity : AppCompatActivity() {
         binding.boxOnlyDot.text = if (checked) "●" else "○"
     }
 
-    private fun showPage(main: Boolean) {
-        binding.mainPage.visibility = if (main) View.VISIBLE else View.GONE
-        binding.connectPage.visibility = if (main) View.GONE else View.VISIBLE
+    private enum class Page { MAIN, CONNECT, PRUNE }
+
+    private fun showPage(page: Page) {
+        binding.mainPage.visibility = if (page == Page.MAIN) View.VISIBLE else View.GONE
+        binding.connectPage.visibility = if (page == Page.CONNECT) View.VISIBLE else View.GONE
+        binding.prunePage.visibility = if (page == Page.PRUNE) View.VISIBLE else View.GONE
     }
 
     // Build one row per signal file: [name]        [Create] [Delete]
@@ -573,5 +585,58 @@ class MainActivity : AppCompatActivity() {
 
     private fun connectLog(message: String) {
         binding.connectLog.text = message
+    }
+
+    private val pruneButtons by lazy {
+        listOf(binding.pruneVehWeek, binding.pruneVehDay, binding.pruneHumWeek, binding.pruneHumDay)
+    }
+
+    // Delete every file in dir whose Dropbox timestamp is older than maxAge (all files, regardless of
+    // the 6-underscore detection-image naming). Deletes immediately, then reports how many went.
+    private fun pruneOlderThan(dir: String, kind: String, period: String, maxAge: Duration) {
+        val client = dbxClient()
+        if (client == null) { binding.pruneLog.text = "Not connected. Connect to Dropbox first."; return }
+        pruneButtons.forEach { it.isEnabled = false }
+        binding.pruneLog.text = "Pruning $kind files older than $period…"
+        val cutoff = Date(System.currentTimeMillis() - maxAge.toMillis())
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                try {
+                    // serverModified is Dropbox's own record of when the file arrived.
+                    val old = listAllFiles(client, dir).filter { it.serverModified.before(cutoff) }
+                    if (old.isEmpty()) "No $kind files older than $period."
+                    else "Deleted ${deleteFiles(client, old.mapNotNull { it.pathLower })} $kind files older than $period."
+                } catch (e: Exception) {
+                    "Error pruning $kind files: ${e.message}"
+                }
+            }
+            binding.pruneLog.text = result
+            pruneButtons.forEach { it.isEnabled = true }
+            refreshImages()  // the newest image may have just been deleted
+        }
+    }
+
+    // Delete the given paths via Dropbox's batch API (chunked, since one batch is capped at 1000),
+    // waiting for each batch to finish. Returns the number actually deleted.
+    private fun deleteFiles(client: DbxClientV2, paths: List<String>): Int {
+        var deleted = 0
+        for (chunk in paths.chunked(1000)) {
+            val launch = client.files().deleteBatch(chunk.map { DeleteArg(it) })
+            val result = when {
+                launch.isComplete -> launch.completeValue
+                launch.isAsyncJobId -> {
+                    var status = client.files().deleteBatchCheck(launch.asyncJobIdValue)
+                    while (status.isInProgress) {
+                        Thread.sleep(500)
+                        status = client.files().deleteBatchCheck(launch.asyncJobIdValue)
+                    }
+                    if (status.isComplete) status.completeValue else null
+                }
+                else -> null
+            }
+            deleted += result?.entries?.count { it.isSuccess } ?: 0
+        }
+        return deleted
     }
 }
