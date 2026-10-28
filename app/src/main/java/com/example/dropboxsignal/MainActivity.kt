@@ -1,5 +1,6 @@
 package com.example.dropboxsignal
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -10,9 +11,11 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -37,6 +40,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
@@ -268,38 +277,109 @@ class MainActivity : AppCompatActivity() {
 
     private data class Loaded(val bytes: ByteArray?, val box: Rect?, val error: String?)
 
-    // One on-screen detection image (vehicle or human): downloads the newest file, caches its
-    // bytes and bounding box, and renders either the whole image or just the box.
+    // One on-screen detection image (vehicle or human): holds the folder's detection files newest
+    // first, downloads the selected one, and renders either the whole image or just the box.
+    // Swiping left shows an older image, right a newer one.
+    @SuppressLint("ClickableViewAccessibility")
     private inner class ImagePanel(
         val dir: String,
         val caption: TextView,
         val image: ImageView,
+        val timeView: TextView,
+        val searchingView: TextView,
         val emptyMsg: String
     ) {
+        private var entries: List<FileMetadata> = emptyList()  // detection images, newest first
+        private var index = 0                                  // which entry is currently shown
         private var bytes: ByteArray? = null
         private var box: Rect? = null
+        private var currentName: String? = null                // filename of the shown image, for its age
+        private var onRefreshDone: (() -> Unit)? = null         // fired once when a refresh fully settles
 
-        // Download the newest detection image, cache its bytes + box, then render.
-        fun refresh() {
+        init {
+            // Detect horizontal flings on the image: left -> older, right -> newer.
+            val detector = GestureDetector(this@MainActivity, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+                override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+                    val start = e1 ?: return false
+                    val dx = e2.x - start.x
+                    val dy = e2.y - start.y
+                    if (abs(dx) > abs(dy) && abs(dx) > dp(40)) {
+                        navigate(if (dx < 0) 1 else -1)  // swipe left = older (+1), right = newer (-1)
+                        return true
+                    }
+                    return false
+                }
+            })
+            image.setOnTouchListener { _, event -> detector.onTouchEvent(event) }
+        }
+
+        // Reload the folder's detection files (newest first) and show the most recent one.
+        // onDone fires exactly once when this refresh has fully settled (rendered, empty, or errored).
+        fun refresh(onDone: () -> Unit = {}) {
+            onRefreshDone = onDone
             val client = dbxClient()
-            if (client == null) { bytes = null; box = null; showEmpty(caption, image, emptyMsg); return }
+            if (client == null) { clear(); showEmpty(caption, image, timeView, emptyMsg); finishRefresh(); return }
+            lifecycleScope.launch {
+                val outcome = withContext(Dispatchers.IO) {
+                    runCatching { detectionImages(client, dir) }
+                }
+                val list = outcome.getOrNull()
+                if (list == null) {
+                    clear()
+                    showEmpty(caption, image, timeView, emptyMsg)
+                    log("Error loading $dir: ${outcome.exceptionOrNull()?.message}")
+                    finishRefresh()
+                    return@launch
+                }
+                entries = list
+                index = 0
+                if (entries.isEmpty()) {
+                    bytes = null; box = null; currentName = null
+                    showEmpty(caption, image, timeView, emptyMsg)
+                    finishRefresh()
+                } else showIndex(0)
+            }
+        }
+
+        // Called at every terminal point of a load (rendered, empty, or errored): clears the swipe
+        // "searching" marker, and fires the pending refresh callback once (null for swipe/toggle loads).
+        private fun finishRefresh() {
+            searchingView.visibility = View.GONE
+            onRefreshDone?.invoke()
+            onRefreshDone = null
+        }
+
+        // Move by delta positions if an entry exists there (older for +1, newer for -1); else ignore.
+        fun navigate(delta: Int) {
+            val target = index + delta
+            if (target in entries.indices) {
+                index = target
+                searchingView.visibility = View.VISIBLE  // cleared when the load settles (finishRefresh)
+                showIndex(target)
+            }
+        }
+
+        // Download entries[i], cache its bytes + box, then render.
+        private fun showIndex(i: Int) {
+            val client = dbxClient() ?: run { clear(); showEmpty(caption, image, timeView, emptyMsg); finishRefresh(); return }
+            val entry = entries[i]
+            currentName = entry.name
             lifecycleScope.launch {
                 val loaded = withContext(Dispatchers.IO) {
                     try {
-                        // A missing folder yields no file, so this shows the empty state, not an error.
-                        val latest = findLatestFile(client, dir)
-                            ?: return@withContext Loaded(null, null, null)
                         val out = ByteArrayOutputStream()
-                        client.files().download(latest.pathLower).download(out)
-                        Loaded(out.toByteArray(), parseBox(latest.name), null)
+                        client.files().download(entry.pathLower).download(out)
+                        Loaded(out.toByteArray(), parseBox(entry.name), null)
                     } catch (e: Exception) {
                         Loaded(null, null, e.message)
                     }
                 }
                 if (loaded.error != null) {
                     bytes = null; box = null
-                    showEmpty(caption, image, emptyMsg)
+                    showEmpty(caption, image, timeView, emptyMsg)
                     log("Error loading $dir: ${loaded.error}")
+                    finishRefresh()
                     return@launch
                 }
                 bytes = loaded.bytes
@@ -308,9 +388,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        private fun clear() {
+            entries = emptyList()
+            index = 0
+            bytes = null
+            box = null
+            currentName = null
+        }
+
         // Re-decode the cached bytes in the current mode; no network, so toggling is instant.
         fun render() {
-            val data = bytes ?: run { showEmpty(caption, image, emptyMsg); return }
+            val data = bytes ?: run { showEmpty(caption, image, timeView, emptyMsg); finishRefresh(); return }
             val useBox = boxOnly
             val rect = box
             lifecycleScope.launch {
@@ -324,25 +412,39 @@ class MainActivity : AppCompatActivity() {
                     caption.visibility = View.GONE
                     image.setImageBitmap(bmp)
                     image.visibility = View.VISIBLE
+                    val ago = currentName?.let { timeAgo(it) }
+                    if (ago != null) { timeView.text = ago; timeView.visibility = View.VISIBLE }
+                    else timeView.visibility = View.GONE
                 } else {
-                    showEmpty(caption, image, emptyMsg)
+                    showEmpty(caption, image, timeView, emptyMsg)
                 }
+                finishRefresh()
             }
         }
     }
 
     private val vehiclePanel by lazy {
-        ImagePanel(vehiclesDir, binding.vehicleCaption, binding.vehicleImage, "No vehicles detected")
+        ImagePanel(vehiclesDir, binding.vehicleCaption, binding.vehicleImage, binding.vehicleTime, binding.vehicleSearching, "No vehicles detected")
     }
     private val humanPanel by lazy {
-        ImagePanel(humansDir, binding.humanCaption, binding.humanImage, "No humans detected")
+        ImagePanel(humansDir, binding.humanCaption, binding.humanImage, binding.humanTime, binding.humanSearching, "No humans detected")
     }
 
-    // Refresh both images from Dropbox (newest vehicle, then newest human below it).
+    // Refresh both images from Dropbox (newest vehicle, then newest human below it). The Refresh
+    // button is greyed out until both panels have fully rendered, so its delay is visible.
     private fun refreshImages() {
         log("")  // drop any stale message; an error from this refresh will re-appear
-        vehiclePanel.refresh()
-        humanPanel.refresh()
+        binding.refreshButton.isEnabled = false
+        binding.refreshButton.text = "Refreshing"
+        var remaining = 2
+        val onPanelDone = {
+            if (--remaining == 0) {
+                binding.refreshButton.isEnabled = true
+                binding.refreshButton.text = "Refresh"
+            }
+        }
+        vehiclePanel.refresh(onPanelDone)
+        humanPanel.refresh(onPanelDone)
     }
 
     // Re-render both already-downloaded images when the "Box only" toggle changes (no download).
@@ -385,11 +487,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showEmpty(caption: TextView, image: ImageView, emptyMsg: String) {
+    private fun showEmpty(caption: TextView, image: ImageView, timeView: TextView, emptyMsg: String) {
         image.visibility = View.GONE
         image.setImageDrawable(null)
+        timeView.visibility = View.GONE
         caption.visibility = View.VISIBLE
         caption.text = emptyMsg
+    }
+
+    // The camera always stamps filenames in Central Time (with DST), so interpret the time in that
+    // zone; the difference to Instant.now() is then correct wherever the phone happens to be.
+    private val cameraZone = ZoneId.of("America/Chicago")
+
+    // "HH:MM ago" under a day, "one day, HH:MM ago" under two, else "X days, HH:MM ago".
+    // The age comes from the filename's leading YYYYMMDD_HHMMSS creation time; null if unparseable.
+    private fun timeAgo(name: String): String? {
+        val parts = name.split("_")
+        if (parts.size < 2) return null
+        val fileTime = try {
+            LocalDateTime.parse(parts[0] + "_" + parts[1], DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+        } catch (e: Exception) {
+            return null
+        }
+        val fileInstant = fileTime.atZone(cameraZone).toInstant()
+        val minutes = Duration.between(fileInstant, Instant.now()).toMinutes().coerceAtLeast(0)
+        val days = minutes / (24 * 60)
+        val hh = minutes % (24 * 60) / 60
+        val mm = minutes % 60
+        return when (days) {
+            0L -> "%02d:%02d ago".format(hh, mm)
+            1L -> "one day, %02d:%02d ago".format(hh, mm)
+            else -> "%d days, %02d:%02d ago".format(days, hh, mm)
+        }
     }
 
     // List every file directly in a folder, paging through all results. A missing folder is empty.
@@ -409,9 +538,9 @@ class MainActivity : AppCompatActivity() {
         return files
     }
 
-    // The newest detection image in a folder, by Dropbox upload time, or null if there is none.
-    private fun findLatestFile(client: DbxClientV2, dir: String): FileMetadata? =
-        listAllFiles(client, dir).filter { isDetectionImage(it.name) }.maxByOrNull { it.serverModified }
+    // A folder's detection images (filenames with six underscores), newest upload first.
+    private fun detectionImages(client: DbxClientV2, dir: String): List<FileMetadata> =
+        listAllFiles(client, dir).filter { isDetectionImage(it.name) }.sortedByDescending { it.serverModified }
 
     private fun isDetectionImage(name: String): Boolean {
         if (name.count { it == '_' } != 6) return false

@@ -135,16 +135,57 @@
                     android:paddingTop="12dp"
                     android:text="No vehicles detected" />
 
-                <ImageView
-                    android:id="@+id/vehicleImage"
+                <FrameLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:adjustViewBounds="true"
-                    android:maxHeight="240dp"
-                    android:scaleType="fitCenter"
-                    android:paddingTop="8dp"
-                    android:visibility="gone"
-                    android:contentDescription="Most recent vehicle detection" />
+                    android:paddingTop="8dp">
+
+                    <ImageView
+                        android:id="@+id/vehicleImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:adjustViewBounds="true"
+                        android:maxHeight="240dp"
+                        android:scaleType="fitCenter"
+                        android:visibility="gone"
+                        android:contentDescription="Most recent vehicle detection" />
+
+                    <!-- Age of the shown detection, parsed from its filename; sits over the image. -->
+                    <TextView
+                        android:id="@+id/vehicleTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|end"
+                        android:layout_marginTop="1px"
+                        android:layout_marginEnd="4dp"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:shadowColor="#000000"
+                        android:shadowDx="1"
+                        android:shadowDy="1"
+                        android:shadowRadius="3"
+                        android:visibility="gone" />
+
+                    <!-- Shown while a swipe is loading another image; sits over the top-left corner. -->
+                    <TextView
+                        android:id="@+id/vehicleSearching"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|start"
+                        android:layout_marginTop="1px"
+                        android:layout_marginStart="4dp"
+                        android:text="searching"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:shadowColor="#000000"
+                        android:shadowDx="1"
+                        android:shadowDy="1"
+                        android:shadowRadius="3"
+                        android:visibility="gone" />
+
+                </FrameLayout>
 
                 <TextView
                     android:id="@+id/humanCaption"
@@ -153,16 +194,57 @@
                     android:paddingTop="12dp"
                     android:text="No humans detected" />
 
-                <ImageView
-                    android:id="@+id/humanImage"
+                <FrameLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:adjustViewBounds="true"
-                    android:maxHeight="240dp"
-                    android:scaleType="fitCenter"
-                    android:paddingTop="8dp"
-                    android:visibility="gone"
-                    android:contentDescription="Most recent human detection" />
+                    android:paddingTop="8dp">
+
+                    <ImageView
+                        android:id="@+id/humanImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:adjustViewBounds="true"
+                        android:maxHeight="240dp"
+                        android:scaleType="fitCenter"
+                        android:visibility="gone"
+                        android:contentDescription="Most recent human detection" />
+
+                    <!-- Age of the shown detection, parsed from its filename; sits over the image. -->
+                    <TextView
+                        android:id="@+id/humanTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|end"
+                        android:layout_marginTop="1px"
+                        android:layout_marginEnd="4dp"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:shadowColor="#000000"
+                        android:shadowDx="1"
+                        android:shadowDy="1"
+                        android:shadowRadius="3"
+                        android:visibility="gone" />
+
+                    <!-- Shown while a swipe is loading another image; sits over the top-left corner. -->
+                    <TextView
+                        android:id="@+id/humanSearching"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top|start"
+                        android:layout_marginTop="1px"
+                        android:layout_marginStart="4dp"
+                        android:text="searching"
+                        android:textColor="#00FF00"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        android:shadowColor="#000000"
+                        android:shadowDx="1"
+                        android:shadowDy="1"
+                        android:shadowRadius="3"
+                        android:visibility="gone" />
+
+                </FrameLayout>
 
                 <TextView
                     android:id="@+id/log"
