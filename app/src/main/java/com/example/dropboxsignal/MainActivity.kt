@@ -22,6 +22,7 @@ import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.dropbox.core.DbxAppInfo
@@ -101,6 +102,14 @@ class MainActivity : AppCompatActivity() {
         binding.pruneVehDay.setOnClickListener { pruneOlderThan(vehiclesDir, "vehicle", "1 day", Duration.ofDays(1)) }
         binding.pruneHumWeek.setOnClickListener { pruneOlderThan(humansDir, "human", "1 week", Duration.ofDays(7)) }
         binding.pruneHumDay.setOnClickListener { pruneOlderThan(humansDir, "human", "1 day", Duration.ofDays(1)) }
+
+        // Full-screen image overlay: a tap on the image or the X dismisses it, as does Back.
+        binding.fullImage.onSingleTap = { hideFullScreen() }
+        binding.fullImageClose.setOnClickListener { hideFullScreen() }
+        onBackPressedDispatcher.addCallback(this) {
+            if (binding.fullImageOverlay.visibility == View.VISIBLE) hideFullScreen()
+            else { isEnabled = false; onBackPressedDispatcher.onBackPressed() }
+        }
 
         buildFileRows()
     }
@@ -322,6 +331,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     return false
                 }
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    if (bytes != null) openFullScreen(bytes, box)  // open the shown image full-screen
+                    return true
+                }
             })
             image.setOnTouchListener { _, event -> detector.onTouchEvent(event) }
         }
@@ -463,6 +476,29 @@ class MainActivity : AppCompatActivity() {
     private fun rerenderImages() {
         vehiclePanel.render()
         humanPanel.render()
+    }
+
+    // Show the given image full-screen and zoomable, decoded at higher resolution than the panel
+    // thumbnail and honoring the current box-only mode. A tap or the X dismisses it.
+    private fun openFullScreen(data: ByteArray?, box: Rect?) {
+        val bytesData = data ?: return
+        val useBox = boxOnly
+        binding.fullImageOverlay.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val bmp = withContext(Dispatchers.Default) {
+                try {
+                    if (useBox && box != null) decodeRegion(bytesData, box, 2560)
+                    else decodeSampled(bytesData, 2560)
+                } catch (e: Exception) { null }
+            }
+            if (bmp != null) binding.fullImage.setImageBitmap(bmp)
+            else hideFullScreen()
+        }
+    }
+
+    private fun hideFullScreen() {
+        binding.fullImageOverlay.visibility = View.GONE
+        binding.fullImage.setImageDrawable(null)
     }
 
     // Bounding box encoded in the filename: ..._<x1>_<y1>_<x2>_<y2>_... (pixels, upper-left corner

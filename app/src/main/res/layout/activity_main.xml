@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
 
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
@@ -302,4 +306,35 @@
 
         </LinearLayout>
     </ScrollView>
-</LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Full-screen, pinch-to-zoom view of a tapped detection image. Hidden by default. -->
+    <FrameLayout
+        android:id="@+id/fullImageOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <com.example.dropboxsignal.ZoomableImageView
+            android:id="@+id/fullImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="Detection image, full screen" />
+
+        <TextView
+            android:id="@+id/fullImageClose"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:padding="16dp"
+            android:text="✕"
+            android:textColor="#FFFFFF"
+            android:textSize="28sp" />
+
+    </FrameLayout>
+
+</FrameLayout>
