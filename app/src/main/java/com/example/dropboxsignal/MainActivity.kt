@@ -30,15 +30,23 @@ import com.dropbox.core.DbxPKCEWebAuth
 import com.dropbox.core.DbxRequestConfig
 import com.dropbox.core.DbxWebAuth
 import com.dropbox.core.TokenAccessType
+import com.dropbox.core.RateLimitException
 import com.dropbox.core.oauth.DbxCredential
 import com.dropbox.core.v2.DbxClientV2
-import com.dropbox.core.v2.files.DeleteArg
 import com.dropbox.core.v2.files.FileMetadata
 import com.dropbox.core.v2.files.ListFolderErrorException
 import com.dropbox.core.v2.files.WriteMode
 import com.example.dropboxsignal.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -48,6 +56,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Date
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
@@ -637,15 +646,32 @@ class MainActivity : AppCompatActivity() {
         val cutoff = Date(System.currentTimeMillis() - maxAge.toMillis())
 
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    // serverModified is Dropbox's own record of when the file arrived.
-                    val old = listAllFiles(client, dir).filter { it.serverModified.before(cutoff) }
-                    if (old.isEmpty()) "No $kind files older than $period."
-                    else "Deleted ${deleteFiles(client, old.mapNotNull { it.pathLower })} $kind files older than $period."
-                } catch (e: Exception) {
-                    "Error pruning $kind files: ${e.message}"
+            var ticker: Job? = null
+            val result = try {
+                // serverModified is Dropbox's own record of when the file arrived.
+                val old = withContext(Dispatchers.IO) {
+                    listAllFiles(client, dir).filter { it.serverModified.before(cutoff) }
                 }
+                if (old.isEmpty()) "No $kind files older than $period."
+                else {
+                    val paths = old.mapNotNull { it.pathLower }
+                    val total = paths.size
+                    val done = AtomicInteger(0)
+                    val deleted = AtomicInteger(0)
+                    // The deletes fan out across many connections, so show running progress.
+                    ticker = launch {
+                        while (isActive) {
+                            binding.pruneLog.text = "Deleting $kind files… ${done.get()} / $total"
+                            delay(200)
+                        }
+                    }
+                    deleteFiles(client, paths, done, deleted)
+                    "Deleted ${deleted.get()} of $total $kind files older than $period."
+                }
+            } catch (e: Exception) {
+                "Error pruning $kind files: ${e.message}"
+            } finally {
+                ticker?.cancel()  // always stop the progress updater before writing the final line
             }
             binding.pruneLog.text = result
             pruneButtons.forEach { it.isEnabled = true }
@@ -653,26 +679,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Delete the given paths via Dropbox's batch API (chunked, since one batch is capped at 1000),
-    // waiting for each batch to finish. Returns the number actually deleted.
-    private fun deleteFiles(client: DbxClientV2, paths: List<String>): Int {
-        var deleted = 0
-        for (chunk in paths.chunked(1000)) {
-            val launch = client.files().deleteBatch(chunk.map { DeleteArg(it) })
-            val result = when {
-                launch.isComplete -> launch.completeValue
-                launch.isAsyncJobId -> {
-                    var status = client.files().deleteBatchCheck(launch.asyncJobIdValue)
-                    while (status.isInProgress) {
-                        Thread.sleep(500)
-                        status = client.files().deleteBatchCheck(launch.asyncJobIdValue)
-                    }
-                    if (status.isComplete) status.completeValue else null
+    // How many deletes to run at once. Dropbox's single-batch delete job is slow server-side
+    // (a few files/sec), so instead we fire many independent deleteV2 calls concurrently;
+    // DbxClientV2 is thread-safe. Higher is faster but more likely to hit rate limits.
+    private val deleteConcurrency = 12
+
+    // Delete the given paths concurrently, counting into done/deleted as each one finishes so the
+    // caller can show progress. Returns the number actually deleted.
+    private suspend fun deleteFiles(
+        client: DbxClientV2,
+        paths: List<String>,
+        done: AtomicInteger,
+        deleted: AtomicInteger
+    ): Int = coroutineScope {
+        val gate = Semaphore(deleteConcurrency)
+        paths.map { path ->
+            async(Dispatchers.IO) {
+                gate.withPermit {
+                    if (deleteOne(client, path)) deleted.incrementAndGet()
+                    done.incrementAndGet()
                 }
-                else -> null
             }
-            deleted += result?.entries?.count { it.isSuccess } ?: 0
+        }.awaitAll()
+        deleted.get()
+    }
+
+    // Delete one path, backing off and retrying when Dropbox rate-limits us. Returns false if the
+    // file is already gone or the delete fails for another reason.
+    private suspend fun deleteOne(client: DbxClientV2, path: String): Boolean {
+        repeat(6) {
+            try {
+                client.files().deleteV2(path)
+                return true
+            } catch (e: RateLimitException) {
+                delay(e.backoffMillis.coerceAtLeast(500L))
+            } catch (e: Exception) {
+                return false
+            }
         }
-        return deleted
+        return false
     }
 }
