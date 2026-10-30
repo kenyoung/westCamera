@@ -23,6 +23,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.addCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.dropbox.core.DbxAppInfo
@@ -80,6 +81,9 @@ class MainActivity : AppCompatActivity() {
     // Detection photos the desktop program drops here; detection images have exactly six underscores.
     private val vehiclesDir = "/detections/vehicles"
     private val humansDir = "/detections/humans"
+    // Where a swipe-down moves a false detection, one per source folder.
+    private val falseVehiclesDir = "/detections/falseVehicles"
+    private val falseHumansDir = "/detections/falseHumans"
 
     // Holds the PKCE code verifier between opening the browser and pasting the code back.
     private var pkceWebAuth: DbxPKCEWebAuth? = null
@@ -313,6 +317,7 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("ClickableViewAccessibility")
     private inner class ImagePanel(
         val dir: String,
+        val falseDir: String,
         val caption: TextView,
         val image: ImageView,
         val timeView: TextView,
@@ -338,6 +343,10 @@ class MainActivity : AppCompatActivity() {
                         navigate(if (dx < 0) 1 else -1)  // swipe left = older (+1), right = newer (-1)
                         return true
                     }
+                    if (abs(dy) > abs(dx) && dy > dp(40)) {
+                        promptMoveFalse()  // swipe down = flag the shown image as a false detection
+                        return true
+                    }
                     return false
                 }
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
@@ -345,7 +354,12 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
             })
-            image.setOnTouchListener { _, event -> detector.onTouchEvent(event) }
+            // Hold the touch stream against the enclosing ScrollView so a downward fling reaches us
+            // instead of being stolen as a scroll.
+            image.setOnTouchListener { v, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
+                detector.onTouchEvent(event)
+            }
         }
 
         // Reload the folder's detection files (newest first) and show the most recent one.
@@ -455,13 +469,55 @@ class MainActivity : AppCompatActivity() {
                 finishRefresh()
             }
         }
+
+        // Swipe-down handler: confirm, then move the shown image to the false-detection folder.
+        private fun promptMoveFalse() {
+            val entry = entries.getOrNull(index) ?: return
+            if (bytes == null) return
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Move false detection?")
+                .setPositiveButton("Yes") { _, _ -> moveFalse(entry) }
+                .setNegativeButton("No") { dialog, _ -> dialog.dismiss() }
+                .show()  // either button dismisses the dialog automatically
+        }
+
+        // Move entry into falseDir, then drop it from the list and show the next older image
+        // (staying at the same index), falling back to a newer one, or empty if none remain.
+        private fun moveFalse(entry: FileMetadata) {
+            val client = dbxClient() ?: return
+            val from = entry.pathLower ?: return
+            searchingView.visibility = View.VISIBLE  // cleared when the reload settles (finishRefresh)
+            lifecycleScope.launch {
+                val moved = withContext(Dispatchers.IO) {
+                    try {
+                        client.files().moveV2Builder(from, "$falseDir/${entry.name}")
+                            .withAutorename(true)  // avoid a clash if that name already exists there
+                            .start()
+                        true
+                    } catch (e: Exception) {
+                        log("Error moving ${entry.name}: ${e.message}")
+                        false
+                    }
+                }
+                if (!moved) { searchingView.visibility = View.GONE; return@launch }
+                entries = entries.toMutableList().also { it.removeAt(index) }
+                if (entries.isEmpty()) {
+                    bytes = null; box = null; currentName = null
+                    searchingView.visibility = View.GONE
+                    showEmpty(caption, image, timeView, emptyMsg)
+                } else {
+                    if (index >= entries.size) index = entries.size - 1
+                    showIndex(index)
+                }
+            }
+        }
     }
 
     private val vehiclePanel by lazy {
-        ImagePanel(vehiclesDir, binding.vehicleCaption, binding.vehicleImage, binding.vehicleTime, binding.vehicleSearching, "No vehicles detected")
+        ImagePanel(vehiclesDir, falseVehiclesDir, binding.vehicleCaption, binding.vehicleImage, binding.vehicleTime, binding.vehicleSearching, "No vehicles detected")
     }
     private val humanPanel by lazy {
-        ImagePanel(humansDir, binding.humanCaption, binding.humanImage, binding.humanTime, binding.humanSearching, "No humans detected")
+        ImagePanel(humansDir, falseHumansDir, binding.humanCaption, binding.humanImage, binding.humanTime, binding.humanSearching, "No humans detected")
     }
 
     // Refresh both images from Dropbox (newest vehicle, then newest human below it). The Refresh
