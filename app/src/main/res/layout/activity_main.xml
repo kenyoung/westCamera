@@ -282,6 +282,13 @@
                     android:text="Prune vehicles older than 1 day" />
 
                 <Button
+                    android:id="@+id/pruneVehUnboxed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Delete unboxed vehicle files" />
+
+                <Button
                     android:id="@+id/pruneHumWeek"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -294,6 +301,13 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:text="Prune humans older than 1 day" />
+
+                <Button
+                    android:id="@+id/pruneHumUnboxed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Delete unboxed human files" />
 
                 <TextView
                     android:id="@+id/pruneLog"

@@ -18,6 +18,7 @@ import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -115,6 +116,8 @@ class MainActivity : AppCompatActivity() {
         binding.pruneVehDay.setOnClickListener { pruneOlderThan(vehiclesDir, "vehicle", "1 day", Duration.ofDays(1)) }
         binding.pruneHumWeek.setOnClickListener { pruneOlderThan(humansDir, "human", "1 week", Duration.ofDays(7)) }
         binding.pruneHumDay.setOnClickListener { pruneOlderThan(humansDir, "human", "1 day", Duration.ofDays(1)) }
+        binding.pruneVehUnboxed.setOnClickListener { pruneUnboxed(vehiclesDir, "vehicle") }
+        binding.pruneHumUnboxed.setOnClickListener { pruneUnboxed(humansDir, "human") }
 
         // Full-screen image overlay: a tap on the image or the X dismisses it, as does Back.
         binding.fullImage.onSingleTap = { hideFullScreen() }
@@ -689,45 +692,67 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val pruneButtons by lazy {
-        listOf(binding.pruneVehWeek, binding.pruneVehDay, binding.pruneHumWeek, binding.pruneHumDay)
+        listOf(
+            binding.pruneVehWeek, binding.pruneVehDay, binding.pruneVehUnboxed,
+            binding.pruneHumWeek, binding.pruneHumDay, binding.pruneHumUnboxed
+        )
     }
 
     // Delete every file in dir whose Dropbox timestamp is older than maxAge (all files, regardless of
-    // the 6-underscore detection-image naming). Deletes immediately, then reports how many went.
+    // the 6-underscore detection-image naming).
     private fun pruneOlderThan(dir: String, kind: String, period: String, maxAge: Duration) {
+        val cutoff = Date(System.currentTimeMillis() - maxAge.toMillis())
+        // serverModified is Dropbox's own record of when the file arrived.
+        prune(dir, "$kind files older than $period") { it.serverModified.before(cutoff) }
+    }
+
+    // Delete the "unboxed" captures: files with only one underscore in the name, i.e. missing the
+    // x1_y1_x2_y2 bounding-box coordinates, so this app can't use them.
+    private fun pruneUnboxed(dir: String, kind: String) {
+        prune(dir, "unboxed $kind files") { it.name.count { c -> c == '_' } == 1 }
+    }
+
+    // Shared delete engine: disable the prune buttons, list dir, keep the files matching `select`,
+    // delete them concurrently with running progress, then report how many went. `noun` names what
+    // is being deleted in the status messages.
+    private fun prune(dir: String, noun: String, select: (FileMetadata) -> Boolean) {
         val client = dbxClient()
         if (client == null) { binding.pruneLog.text = "Not connected. Connect to Dropbox first."; return }
         pruneButtons.forEach { it.isEnabled = false }
-        binding.pruneLog.text = "Pruning $kind files older than $period…"
-        val cutoff = Date(System.currentTimeMillis() - maxAge.toMillis())
+        binding.pruneLog.text = "Finding $noun…"
 
         lifecycleScope.launch {
+            // Keep the screen on for the whole operation: if it timed out, the Activity would be
+            // backgrounded and Android would suspend the app (and its network) mid-delete. A partial
+            // wake lock isn't enough — it keeps the CPU up but doesn't stop a cached app being frozen.
+            // Cleared in finally so normal timeout resumes.
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             var ticker: Job? = null
             val result = try {
-                // serverModified is Dropbox's own record of when the file arrived.
-                val old = withContext(Dispatchers.IO) {
-                    listAllFiles(client, dir).filter { it.serverModified.before(cutoff) }
+                val matches = withContext(Dispatchers.IO) {
+                    listAllFiles(client, dir).filter(select)
                 }
-                if (old.isEmpty()) "No $kind files older than $period."
+                if (matches.isEmpty()) "No $noun to delete."
                 else {
-                    val paths = old.mapNotNull { it.pathLower }
+                    val paths = matches.mapNotNull { it.pathLower }
                     val total = paths.size
                     val done = AtomicInteger(0)
                     val deleted = AtomicInteger(0)
                     // The deletes fan out across many connections, so show running progress.
                     ticker = launch {
                         while (isActive) {
-                            binding.pruneLog.text = "Deleting $kind files… ${done.get()} / $total"
+                            binding.pruneLog.text = "Deleting $noun… ${done.get()} / $total"
                             delay(200)
                         }
                     }
                     deleteFiles(client, paths, done, deleted)
-                    "Deleted ${deleted.get()} of $total $kind files older than $period."
+                    "Deleted ${deleted.get()} of $total $noun."
                 }
             } catch (e: Exception) {
-                "Error pruning $kind files: ${e.message}"
+                "Error deleting $noun: ${e.message}"
             } finally {
                 ticker?.cancel()  // always stop the progress updater before writing the final line
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
             binding.pruneLog.text = result
             pruneButtons.forEach { it.isEnabled = true }
