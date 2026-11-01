@@ -47,8 +47,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -118,6 +116,7 @@ class MainActivity : AppCompatActivity() {
         binding.pruneHumDay.setOnClickListener { pruneOlderThan(humansDir, "human", "1 day", Duration.ofDays(1)) }
         binding.pruneVehUnboxed.setOnClickListener { pruneUnboxed(vehiclesDir, "vehicle") }
         binding.pruneHumUnboxed.setOnClickListener { pruneUnboxed(humansDir, "human") }
+        binding.pruneAllUnboxed.setOnClickListener { pruneAllUnboxed() }
 
         // Full-screen image overlay: a tap on the image or the X dismisses it, as does Back.
         binding.fullImage.onSingleTap = { hideFullScreen() }
@@ -480,7 +479,7 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this@MainActivity)
                 .setTitle("Move false detection?")
                 .setPositiveButton("Yes") { _, _ -> moveFalse(entry) }
-                .setNegativeButton("No") { dialog, _ -> dialog.dismiss() }
+                .setNegativeButton("No", null)
                 .show()  // either button dismisses the dialog automatically
         }
 
@@ -506,8 +505,8 @@ class MainActivity : AppCompatActivity() {
                 entries = entries.toMutableList().also { it.removeAt(index) }
                 if (entries.isEmpty()) {
                     bytes = null; box = null; currentName = null
-                    searchingView.visibility = View.GONE
                     showEmpty(caption, image, timeView, emptyMsg)
+                    finishRefresh()  // hides the searching marker, like the other terminal paths
                 } else {
                     if (index >= entries.size) index = entries.size - 1
                     showIndex(index)
@@ -694,7 +693,8 @@ class MainActivity : AppCompatActivity() {
     private val pruneButtons by lazy {
         listOf(
             binding.pruneVehWeek, binding.pruneVehDay, binding.pruneVehUnboxed,
-            binding.pruneHumWeek, binding.pruneHumDay, binding.pruneHumUnboxed
+            binding.pruneHumWeek, binding.pruneHumDay, binding.pruneHumUnboxed,
+            binding.pruneAllUnboxed
         )
     }
 
@@ -703,19 +703,26 @@ class MainActivity : AppCompatActivity() {
     private fun pruneOlderThan(dir: String, kind: String, period: String, maxAge: Duration) {
         val cutoff = Date(System.currentTimeMillis() - maxAge.toMillis())
         // serverModified is Dropbox's own record of when the file arrived.
-        prune(dir, "$kind files older than $period") { it.serverModified.before(cutoff) }
+        prune(listOf(dir), "$kind files older than $period") { it.serverModified.before(cutoff) }
     }
 
-    // Delete the "unboxed" captures: files with only one underscore in the name, i.e. missing the
-    // x1_y1_x2_y2 bounding-box coordinates, so this app can't use them.
+    // Delete the "unboxed" captures in one folder, or in both when kind covers them all.
     private fun pruneUnboxed(dir: String, kind: String) {
-        prune(dir, "unboxed $kind files") { it.name.count { c -> c == '_' } == 1 }
+        prune(listOf(dir), "unboxed $kind files") { isUnboxed(it.name) }
     }
 
-    // Shared delete engine: disable the prune buttons, list dir, keep the files matching `select`,
-    // delete them concurrently with running progress, then report how many went. `noun` names what
-    // is being deleted in the status messages.
-    private fun prune(dir: String, noun: String, select: (FileMetadata) -> Boolean) {
+    private fun pruneAllUnboxed() {
+        prune(listOf(vehiclesDir, humansDir), "unboxed files") { isUnboxed(it.name) }
+    }
+
+    // An "unboxed" capture has only one underscore in its name, i.e. no x1_y1_x2_y2 bounding-box
+    // coordinates, so this app can't use it.
+    private fun isUnboxed(name: String) = name.count { it == '_' } == 1
+
+    // Shared delete engine: disable the prune buttons, list the dirs, keep the files matching
+    // `select`, delete them concurrently with running progress, then report how many went. `noun`
+    // names what is being deleted in the status messages.
+    private fun prune(dirs: List<String>, noun: String, select: (FileMetadata) -> Boolean) {
         val client = dbxClient()
         if (client == null) { binding.pruneLog.text = "Not connected. Connect to Dropbox first."; return }
         pruneButtons.forEach { it.isEnabled = false }
@@ -730,7 +737,7 @@ class MainActivity : AppCompatActivity() {
             var ticker: Job? = null
             val result = try {
                 val matches = withContext(Dispatchers.IO) {
-                    listAllFiles(client, dir).filter(select)
+                    dirs.flatMap { listAllFiles(client, it).filter(select) }
                 }
                 if (matches.isEmpty()) "No $noun to delete."
                 else {
@@ -740,8 +747,10 @@ class MainActivity : AppCompatActivity() {
                     val deleted = AtomicInteger(0)
                     // The deletes fan out across many connections, so show running progress.
                     ticker = launch {
+                        var shown = -1
                         while (isActive) {
-                            binding.pruneLog.text = "Deleting $noun… ${done.get()} / $total"
+                            val n = done.get()
+                            if (n != shown) { binding.pruneLog.text = "Deleting $noun… $n / $total"; shown = n }
                             delay(200)
                         }
                     }
@@ -766,23 +775,25 @@ class MainActivity : AppCompatActivity() {
     private val deleteConcurrency = 12
 
     // Delete the given paths concurrently, counting into done/deleted as each one finishes so the
-    // caller can show progress. Returns the number actually deleted.
+    // caller can show progress. Runs a fixed pool of deleteConcurrency workers that pull from a
+    // shared cursor, so cost is O(workers) coroutines regardless of how many paths there are.
     private suspend fun deleteFiles(
         client: DbxClientV2,
         paths: List<String>,
         done: AtomicInteger,
         deleted: AtomicInteger
-    ): Int = coroutineScope {
-        val gate = Semaphore(deleteConcurrency)
-        paths.map { path ->
+    ): Unit = coroutineScope {
+        val next = AtomicInteger(0)
+        (0 until deleteConcurrency).map {
             async(Dispatchers.IO) {
-                gate.withPermit {
-                    if (deleteOne(client, path)) deleted.incrementAndGet()
+                while (true) {
+                    val i = next.getAndIncrement()
+                    if (i >= paths.size) break
+                    if (deleteOne(client, paths[i])) deleted.incrementAndGet()
                     done.incrementAndGet()
                 }
             }
         }.awaitAll()
-        deleted.get()
     }
 
     // Delete one path, backing off and retrying when Dropbox rate-limits us. Returns false if the

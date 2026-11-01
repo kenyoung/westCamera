@@ -309,6 +309,13 @@
                     android:layout_marginTop="8dp"
                     android:text="Delete unboxed human files" />
 
+                <Button
+                    android:id="@+id/pruneAllUnboxed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
+                    android:text="Delete all unboxed files" />
+
                 <TextView
                     android:id="@+id/pruneLog"
                     android:layout_width="match_parent"
